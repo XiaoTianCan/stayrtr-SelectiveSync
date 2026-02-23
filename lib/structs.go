@@ -41,6 +41,7 @@ const (
 	PDU_ID_CACHE_RESET    = 8
 	PDU_ID_ROUTER_KEY     = 9
 	PDU_ID_ERROR_REPORT   = 10
+	PDU_ID_SUBSCRIBE      = 99
 
 	FLAG_ADDED   = 1
 	FLAG_REMOVED = 0
@@ -94,6 +95,8 @@ func TypeToString(t uint8) string {
 		return "Router Key"
 	case PDU_ID_ERROR_REPORT:
 		return "Error Report"
+	case PDU_ID_SUBSCRIBE:
+		return "Subscribe"
 	default:
 		return fmt.Sprintf("Unknown type %d", t)
 	}
@@ -515,6 +518,43 @@ func (pdu *PDUErrorReport) Write(wr io.Writer) {
 	}
 }
 
+type PDUSubscribe struct {
+	Version        uint8
+	SubscribedList []uint8
+}
+
+func (pdu *PDUSubscribe) String() string {
+	return fmt.Sprintf("PDU Subscribe v%d (subscribed to: %v)", pdu.Version, pdu.SubscribedList)
+}
+
+func (pdu *PDUSubscribe) Bytes() []byte {
+	b := bytes.NewBuffer([]byte{})
+	pdu.Write(b)
+	return b.Bytes()
+}
+
+func (pdu *PDUSubscribe) SetVersion(version uint8) {
+	pdu.Version = version
+}
+
+func (pdu *PDUSubscribe) GetVersion() uint8 {
+	return pdu.Version
+}
+
+func (pdu *PDUSubscribe) GetType() uint8 {
+	return PDU_ID_SUBSCRIBE
+}
+
+func (pdu *PDUSubscribe) Write(wr io.Writer) {
+	binary.Write(wr, binary.BigEndian, uint8(pdu.Version))
+	binary.Write(wr, binary.BigEndian, uint8(PDU_ID_SUBSCRIBE))
+	binary.Write(wr, binary.BigEndian, uint16(0))
+	binary.Write(wr, binary.BigEndian, uint32(8+len(pdu.SubscribedList)))
+	for _, pduType := range pdu.SubscribedList {
+		binary.Write(wr, binary.BigEndian, pduType)
+	}
+}
+
 func DecodeBytes(b []byte) (PDU, error) {
 	buf := bytes.NewBuffer(b)
 	return Decode(buf)
@@ -699,6 +739,16 @@ func Decode(rdr io.Reader) (PDU, error) {
 			ErrorCode: sessionId,
 			PDUCopy:   errPdu,
 			ErrorMsg:  errMsg,
+		}, nil
+	case PDU_ID_SUBSCRIBE:
+		if len(toread) == 0 {
+			return nil, fmt.Errorf("wrong length for Subscribe PDU: %d < 1", len(toread))
+		}
+		subscribedList := make([]uint8, len(toread))
+		copy(subscribedList, toread)
+		return &PDUSubscribe{
+			Version:        pver,
+			SubscribedList: subscribedList,
 		}, nil
 	default:
 		return nil, errors.New("could not decode packet")

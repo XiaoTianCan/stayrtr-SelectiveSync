@@ -30,12 +30,38 @@ The compiled binary will be available in the `dist` directory.
 | `-port` | `8282` | RTR server port |
 | `-protocol` | `plain` | Connection protocol: `plain`, `tls`, or `ssh` |
 | `-stats` | `30s` | Interval for printing statistics |
+| `-subscribe` | `` (all) | Subscribe to specific PDU types (comma-separated). Leave empty to subscribe to all types |
+
+### PDU Type Codes
+
+The `-subscribe` flag accepts a comma-separated list of PDU type codes:
+
+| Code | PDU Type | Description |
+|------|----------|-------------|
+| `4` | IPv4 Prefix | IPv4 prefix authorizations (VRPs) |
+| `6` | IPv6 Prefix | IPv6 prefix authorizations (VRPs) |
+| `9` | Router Key | BGPsec router keys |
 
 ### Examples
 
 **Connect to local RTR server over plain TCP:**
 ```bash
 ./rtr-client -host 127.0.0.1 -port 8282 -protocol plain
+```
+
+**Subscribe only to IPv4 and IPv6 prefixes (no router keys):**
+```bash
+./rtr-client -host 127.0.0.1 -port 8282 -subscribe "4,6"
+```
+
+**Subscribe only to router keys:**
+```bash
+./rtr-client -host 127.0.0.1 -port 8282 -subscribe "9"
+```
+
+**Subscribe to all data types (default behavior):**
+```bash
+./rtr-client -host 127.0.0.1 -port 8282 -subscribe ""
 ```
 
 ## Output
@@ -57,6 +83,15 @@ Total VRPs: 142
 Total BGPsec Keys: 8
 =====================================
 ```
+
+## PDU Subscription Mechanism
+
+The client can selectively subscribe to specific PDU types during the RTR session handshake. This allows you to:
+- Reduce bandwidth usage by filtering unwanted data types
+- Focus on specific routing security data (e.g., only IPv6 Prefixes)
+- Improve performance in large-scale deployments
+
+When no subscription filter is specified (default), the client receives all available data types from the server. If the server supports subscription filtering, it will honor the subscription list; otherwise, all data types are sent.
 
 ## Related Documentation
 

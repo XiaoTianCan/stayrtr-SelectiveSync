@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-        "encoding/json"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
 	"net"
-        "net/http"
+	"net/http"
 	"net/netip"
 	"sync"
 
@@ -162,8 +162,8 @@ type ServerConfiguration struct {
 
 	SessId int
 
-	DisableBGPSec	bool
-	EnableNODELAY	bool
+	DisableBGPSec bool
+	EnableNODELAY bool
 
 	RefreshInterval uint32
 	RetryInterval   uint32
@@ -174,10 +174,10 @@ type ServerConfiguration struct {
 }
 
 func NewServer(configuration ServerConfiguration, handler RTRServerEventHandler, simpleHandler RTREventHandler) *Server {
-	sessids := make([]uint16, 0, int(configuration.ProtocolVersion) + 1)
+	sessids := make([]uint16, 0, int(configuration.ProtocolVersion)+1)
 	s := GenerateSessionId()
 	for i := 0; i <= int(configuration.ProtocolVersion); i++ {
-		sessids = append(sessids, s + uint16(100 * i))
+		sessids = append(sessids, s+uint16(100*i))
 	}
 
 	refreshInterval := uint32(3600)
@@ -194,26 +194,26 @@ func NewServer(configuration ServerConfiguration, handler RTRServerEventHandler,
 	}
 
 	return &Server{
-		sdlock:       &sync.RWMutex{},
-		sdListDiff:   make([][]SendableData, 0),
-		sdCurrent:    make([]SendableData, 0),
-		keepDiff:     configuration.KeepDifference,
+		sdlock:     &sync.RWMutex{},
+		sdListDiff: make([][]SendableData, 0),
+		sdCurrent:  make([]SendableData, 0),
+		keepDiff:   configuration.KeepDifference,
 
-		clientlock:     &sync.RWMutex{},
-		clients:        make([]*Client, 0),
-		sessId:         sessids,
-		maxconn:        configuration.MaxConn,
-		baseVersion:    configuration.ProtocolVersion,
+		clientlock:  &sync.RWMutex{},
+		clients:     make([]*Client, 0),
+		sessId:      sessids,
+		maxconn:     configuration.MaxConn,
+		baseVersion: configuration.ProtocolVersion,
 
 		enforceVersion: configuration.EnforceVersion,
-		disableBGPSec:	configuration.DisableBGPSec,
+		disableBGPSec:  configuration.DisableBGPSec,
 
 		pduRefreshInterval: refreshInterval,
 		pduRetryInterval:   retryInterval,
 		pduExpireInterval:  expireInterval,
 
-		handler:        handler,
-		simpleHandler:  simpleHandler,
+		handler:       handler,
+		simpleHandler: simpleHandler,
 
 		log:        configuration.Log,
 		logverbose: configuration.LogVerbose,
@@ -322,7 +322,7 @@ func (s *Server) getSDsSerialDiff(serial uint32) ([]SendableData, bool) {
 		return nil, false
 	}
 
-	sd := s.sdListDiff[len(s.sdListDiff) - diff]
+	sd := s.sdListDiff[len(s.sdListDiff)-diff]
 	return sd, true
 }
 
@@ -374,7 +374,7 @@ func (s *Server) AddData(new []SendableData) bool {
 
 func (s *Server) AddSDsDiff(diff []SendableData) {
 	s.sdlock.RLock()
-	nextDiff := make([][]SendableData, len(s.sdListDiff) + 1)
+	nextDiff := make([][]SendableData, len(s.sdListDiff)+1)
 	for i, prevSDs := range s.sdListDiff {
 		nextDiff[i] = ApplyDiff(diff, prevSDs)
 	}
@@ -387,7 +387,7 @@ func (s *Server) AddSDsDiff(diff []SendableData) {
 
 	nextDiff = append(nextDiff, diff)
 	if s.keepDiff > 0 && len(nextDiff) > s.keepDiff {
-		nextDiff = nextDiff[len(nextDiff) - s.keepDiff:]
+		nextDiff = nextDiff[len(nextDiff)-s.keepDiff:]
 	}
 
 	s.sdListDiff = nextDiff
@@ -651,12 +651,14 @@ func (s *Server) NotifyClientsLatest() {
 
 func ClientFromConn(tcpconn net.Conn, handler RTRServerEventHandler, simpleHandler RTREventHandler) *Client {
 	return &Client{
-		tcpconn:       tcpconn,
-		rd:            tcpconn,
-		wr:            tcpconn,
-		handler:       handler,
-		simpleHandler: simpleHandler,
-		transmits:     make(chan PDU, 256),
+		tcpconn:            tcpconn,
+		rd:                 tcpconn,
+		wr:                 tcpconn,
+		handler:            handler,
+		simpleHandler:      simpleHandler,
+		transmits:          make(chan PDU, 256),
+		subscribedPDUTypes: make(map[uint8]bool),
+		readBuffer:         make([]byte, 0, 32768),
 	}
 }
 
@@ -689,7 +691,10 @@ type Client struct {
 
 	dontSendBGPsecKeys bool
 
-	log Logger
+	subscribedPDUTypes map[uint8]bool
+
+	readBuffer []byte // caches incoming data until a full PDU can be parsed
+	log        Logger
 }
 
 func (c *Client) String() string {
@@ -781,50 +786,114 @@ func (c *Client) readLoop(ctx context.Context) error {
 				return err
 			}
 
-			pkt := buf[0:length]
-			dec, err := DecodeBytes(pkt)
-			if err != nil || dec == nil {
-				if c.log != nil {
-					c.log.Errorf("Error %v", err)
+			// append new data to buffer
+			c.readBuffer = append(c.readBuffer, buf[0:length]...)
+
+			// try to read a complete PDU from buffer
+			for {
+				if len(c.readBuffer) < 8 {
+					break
 				}
-				c.Disconnect()
-				return err
-			}
-			if !c.disableVersionCheck {
-				if err := c.checkVersion(dec.GetVersion()); err != nil {
-					// checkVersion returns an error if it issued a disconnect
+
+				// read PDU length from header
+				pduLength := uint32(c.readBuffer[4])<<24 |
+					uint32(c.readBuffer[5])<<16 |
+					uint32(c.readBuffer[6])<<8 |
+					uint32(c.readBuffer[7])
+
+				// check PDU length validity
+				if pduLength < 8 {
+					if c.log != nil {
+						c.log.Errorf("Invalid PDU length: %d < 8", pduLength)
+					}
+					c.Disconnect()
+					return fmt.Errorf("invalid PDU length: %d", pduLength)
+				}
+				if pduLength > 262168 { // messageMaxSize
+					if c.log != nil {
+						c.log.Errorf("PDU length exceeds maximum: %d > 262168", pduLength)
+					}
+					c.Disconnect()
+					return fmt.Errorf("PDU length exceeds maximum: %d", pduLength)
+				}
+
+				// check if we have enough data for the complete PDU
+				if uint32(len(c.readBuffer)) < pduLength {
+					// not enough data yet, wait for more
+					break
+				}
+
+				// we have a complete PDU, decode it
+				pkt := c.readBuffer[0:pduLength]
+				dec, err := DecodeBytes(pkt)
+				if err != nil || dec == nil {
+					if c.log != nil {
+						c.log.Errorf("Error decoding PDU: %v", err)
+					}
+					c.Disconnect()
 					return err
 				}
-			}
-			if c.log != nil {
-				c.log.Debugf("%v: Received %v", c.String(), dec)
-			}
 
-			if c.enforceVersion {
-				if !IsCorrectPDUVersion(dec, c.version) {
-					if c.log != nil {
-						c.log.Debugf("Bad version error")
+				// remove the processed PDU from buffer
+				c.readBuffer = c.readBuffer[pduLength:]
+
+				// check version if not already set
+				if !c.disableVersionCheck {
+					if err := c.checkVersion(dec.GetVersion()); err != nil {
+						// checkVersion already handles logging and disconnecting, just return the error here
+						return err
 					}
-					c.SendWrongVersionError()
-					c.Disconnect()
-					return fmt.Errorf("%s: bad version error", c.String())
 				}
-			}
 
-			switch pduconv := dec.(type) {
-			case *PDUSerialQuery:
-				c.curserial = pduconv.SerialNumber
-			}
+				if c.log != nil {
+					c.log.Debugf("%v: Received %v", c.String(), dec)
+				}
 
-			if c.handler != nil {
-				c.handler.HandlePDU(c, dec)
-			}
+				// check if the PDU type is subscribed by the client (for non-Subscribe PDUs)
+				if c.enforceVersion {
+					if !IsCorrectPDUVersion(dec, c.version) {
+						if c.log != nil {
+							c.log.Debugf("Bad version error")
+						}
+						c.SendWrongVersionError()
+						c.Disconnect()
+						return fmt.Errorf("%s: bad version error", c.String())
+					}
+				}
 
-			c.passSimpleHandler(dec)
+				// deal with PDUs
+				switch pduconv := dec.(type) {
+				case *PDUSerialQuery:
+					c.curserial = pduconv.SerialNumber
+				case *PDUResetQuery:
+					if c.log != nil {
+						c.log.Infof("%v: Received Reset Query", c.String())
+					} else {
+						fmt.Printf("%v: Received Reset Query\n", c.String())
+					}
+				case *PDUSubscribe:
+					fmt.Printf("Received Subscribe PDU: %v\n", pduconv.SubscribedList)
+					// update client's subscribed PDU types
+					c.subscribedPDUTypes = make(map[uint8]bool)
+					for _, pduType := range pduconv.SubscribedList {
+						c.subscribedPDUTypes[pduType] = true
+					}
+					if c.log != nil {
+						c.log.Debugf("%v: Updated subscription list to: %v", c.String(), pduconv.SubscribedList)
+					}
+					// donn't need to pass this to the handler, as it's handled here
+					continue
+				}
+
+				if c.handler != nil {
+					c.handler.HandlePDU(c, dec)
+				}
+
+				c.passSimpleHandler(dec)
+			}
 		}
 	}
 }
-
 
 func (c *Client) Start() {
 	defer c.tcpconn.Close()
@@ -1007,6 +1076,27 @@ func (c *Client) SendWrongVersionError() {
 
 // Converts a SendableData to a PDU and sends it to the client
 func (c *Client) SendData(sd SendableData) {
+	// Check if subscription list is set and check if this data type is subscribed
+	// If subscribedPDUTypes is empty (not set), send all data types
+	if len(c.subscribedPDUTypes) > 0 {
+		switch t := sd.(type) {
+		case *VRP:
+			if t.Prefix.Addr().Is6() {
+				if !c.subscribedPDUTypes[PDU_ID_IPV6_PREFIX] {
+					return
+				}
+			} else if t.Prefix.Addr().Is4() {
+				if !c.subscribedPDUTypes[PDU_ID_IPV4_PREFIX] {
+					return
+				}
+			}
+		case *BgpsecKey:
+			if !c.subscribedPDUTypes[PDU_ID_ROUTER_KEY] {
+				return
+			}
+		}
+	}
+
 	switch t := sd.(type) {
 	case *VRP:
 

@@ -65,6 +65,13 @@ func (c *ClientSession) SendSerialQuery(sessionid uint16, serial uint32) {
 	c.SendPDU(pdu)
 }
 
+func (c *ClientSession) SendSubscribe(subscribedPDUTypes []uint8) {
+	pdu := &PDUSubscribe{
+		SubscribedList: subscribedPDUTypes,
+	}
+	c.SendPDU(pdu)
+}
+
 func (c *ClientSession) SendPDU(pdu PDU) {
 	pdu.SetVersion(c.version)
 	c.SendRawPDU(pdu)
@@ -78,6 +85,9 @@ func (c *ClientSession) sendLoop() {
 	for c.connected {
 		select {
 		case pdu := <-c.transmits:
+			if c.log != nil {
+				c.log.Infof("Sending PDU from client: %s", TypeToString(pdu.GetType()))
+			}
 			if c.wr != nil {
 				c.wr.Write(pdu.Bytes())
 			}

@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -15,22 +17,23 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// RTRClient 管理 RTR 协议客户端会话
+// RTRClient
 type RTRClient struct {
 	addr     string
 	connType int
 	session  *rtr.ClientSession
 
-	vrps      map[string]*rtr.VRP      // 前缀信息缓存
-	brks      map[string]*rtr.BgpsecKey // BGPsec 密钥缓存
-	serial    uint32                    // 当前 serial
-	sessionID uint16                    // 会话 ID
+	vrps      map[string]*rtr.VRP       // prefix cache
+	brks      map[string]*rtr.BgpsecKey // BGPsec key cache
+	serial    uint32                    // current serial
+	sessionID uint16                    // session ID
 	mutex     sync.RWMutex
 
-	handler *ClientEventHandler
+	handler        *ClientEventHandler
+	subscribedList []uint8 // subscribed PDU types
 }
 
-// ClientEventHandler 实现 RTRClientSessionEventHandler 接口
+// ClientEventHandler implements RTRClientSessionEventHandler interface
 type ClientEventHandler struct {
 	client *RTRClient
 }
@@ -67,7 +70,7 @@ func (h *ClientEventHandler) HandlePDU(cs *rtr.ClientSession, pdu rtr.PDU) {
 	case *rtr.PDUSerialNotify:
 		p := pdu.(*rtr.PDUSerialNotify)
 		log.Printf("[Serial Notify] SessionID: %d, Serial: %d\n", p.SessionId, p.SerialNumber)
-		// 发送 Serial Query 更新数据
+		// send Serial Query to update to the latest data
 		h.client.mutex.RLock()
 		sessionID := h.client.sessionID
 		serial := h.client.serial
@@ -75,7 +78,7 @@ func (h *ClientEventHandler) HandlePDU(cs *rtr.ClientSession, pdu rtr.PDU) {
 		h.client.session.SendSerialQuery(sessionID, serial)
 
 	case *rtr.PDUCacheReset:
-		log.Printf("[Cache Reset] 需要重新获取所有数据\n")
+		log.Printf("[Cache Reset] Need to get all data again\n")
 		h.client.session.SendResetQuery()
 
 	case *rtr.PDUErrorReport:
@@ -88,16 +91,23 @@ func (h *ClientEventHandler) HandlePDU(cs *rtr.ClientSession, pdu rtr.PDU) {
 }
 
 func (h *ClientEventHandler) ClientConnected(cs *rtr.ClientSession) {
-	log.Println("[Connected] RTR 客户端已连接")
-	// 发送初始 Reset Query
+	log.Println("[Connected] RTR client connected to server")
+
+	// send Subscribe PDU
+	if len(h.client.subscribedList) > 0 {
+		h.client.session.SendSubscribe(h.client.subscribedList)
+		log.Printf("[Subscribe] Have sent subscribed types: %v\n", h.client.subscribedList)
+	}
+
+	// send Reset Query
 	h.client.session.SendResetQuery()
 }
 
 func (h *ClientEventHandler) ClientDisconnected(cs *rtr.ClientSession) {
-	log.Println("[Disconnected] RTR 客户端已断开连接")
+	log.Println("[Disconnected] RTR client disconnected")
 }
 
-// handleIPv4Prefix 处理 IPv4 前缀 PDU
+// handleIPv4Prefix PDU
 func (c *RTRClient) handleIPv4Prefix(pdu *rtr.PDUIPv4Prefix) {
 	prefix := pdu.Prefix
 	key := fmt.Sprintf("%s-%d-%d", prefix.String(), pdu.MaxLen, pdu.ASN)
@@ -119,7 +129,7 @@ func (c *RTRClient) handleIPv4Prefix(pdu *rtr.PDUIPv4Prefix) {
 	}
 }
 
-// handleIPv6Prefix 处理 IPv6 前缀 PDU
+// handleIPv6Prefix PDU
 func (c *RTRClient) handleIPv6Prefix(pdu *rtr.PDUIPv6Prefix) {
 	prefix := pdu.Prefix
 	key := fmt.Sprintf("%s-%d-%d", prefix.String(), pdu.MaxLen, pdu.ASN)
@@ -141,7 +151,7 @@ func (c *RTRClient) handleIPv6Prefix(pdu *rtr.PDUIPv6Prefix) {
 	}
 }
 
-// handleRouterKey 处理 BGPsec 路由器密钥 PDU
+// handleRouterKey PDU
 func (c *RTRClient) handleRouterKey(pdu *rtr.PDURouterKey) {
 	key := fmt.Sprintf("%d-%x", pdu.ASN, pdu.SubjectKeyIdentifier)
 
@@ -162,7 +172,7 @@ func (c *RTRClient) handleRouterKey(pdu *rtr.PDURouterKey) {
 	}
 }
 
-// GetVRPs 获取当前所有 VRP
+// GetVRPs get all VRPs
 func (c *RTRClient) GetVRPs() []*rtr.VRP {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -174,7 +184,7 @@ func (c *RTRClient) GetVRPs() []*rtr.VRP {
 	return vrps
 }
 
-// GetBGPsecKeys 获取当前所有 BGPsec 密钥
+// GetBGPsecKeys get all current BGPsec keys
 func (c *RTRClient) GetBGPsecKeys() []*rtr.BgpsecKey {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -186,7 +196,7 @@ func (c *RTRClient) GetBGPsecKeys() []*rtr.BgpsecKey {
 	return brks
 }
 
-// PrintStats 打印统计信息
+// PrintStats print current stats of the client
 func (c *RTRClient) PrintStats() {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -199,7 +209,7 @@ func (c *RTRClient) PrintStats() {
 	log.Printf("=====================================\n")
 }
 
-// Connect 连接到 RTR 服务器
+// Connect to RTR server
 func (c *RTRClient) Connect(protocol string) error {
 	config := rtr.ClientConfiguration{
 		ProtocolVersion: rtr.PROTOCOL_VERSION_1,
@@ -218,7 +228,7 @@ func (c *RTRClient) Connect(protocol string) error {
 	case "tls":
 		c.connType = rtr.TYPE_TLS
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: true, // 仅用于测试，生产环境应该验证证书
+			InsecureSkipVerify: true, // only for testing, in production you should verify the server's certificate
 		}
 		err = c.session.Start(c.addr, rtr.TYPE_TLS, tlsConfig, nil)
 
@@ -227,9 +237,9 @@ func (c *RTRClient) Connect(protocol string) error {
 		sshConfig := &ssh.ClientConfig{
 			User: "rpki",
 			Auth: []ssh.AuthMethod{
-				ssh.Password(""), // 无密码认证，仅用于测试
+				ssh.Password(""), // no password, only for testing
 			},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(), // 仅用于测试
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(), // only for testing, in production you should verify the server's host key
 			Timeout:         10 * time.Second,
 		}
 		err = c.session.Start(c.addr, rtr.TYPE_SSH, nil, sshConfig)
@@ -241,7 +251,7 @@ func (c *RTRClient) Connect(protocol string) error {
 	return err
 }
 
-// SimpleLogger 简单日志实现
+// SimpleLogger is a simple implementation of Logger interface that logs to standard output
 type SimpleLogger struct{}
 
 func (l *SimpleLogger) Debugf(format string, args ...interface{}) {
@@ -264,41 +274,84 @@ func (l *SimpleLogger) Infof(format string, args ...interface{}) {
 	log.Printf("[INFO] "+format, args...)
 }
 
+// parseSubscribeList parse the subscribe string into a list of PDU types
+func parseSubscribeList(subscribeStr string) ([]uint8, error) {
+	if subscribeStr == "" {
+		// if null or empty, subscribe all types
+		return []uint8{rtr.PDU_ID_IPV4_PREFIX, rtr.PDU_ID_IPV6_PREFIX, rtr.PDU_ID_ROUTER_KEY}, nil
+	}
+
+	parts := strings.Split(subscribeStr, ",")
+	var subscribedList []uint8
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		num, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid PDU type: %s", part)
+		}
+
+		pduType := uint8(num)
+		// validate the PDU type and add to the subscribed list
+		switch pduType {
+		case rtr.PDU_ID_IPV4_PREFIX, rtr.PDU_ID_IPV6_PREFIX, rtr.PDU_ID_ROUTER_KEY:
+			subscribedList = append(subscribedList, pduType)
+		default:
+			return nil, fmt.Errorf("Unsupported PDU type: %d (Only support 4=IPv4 Prefix, 6=IPv6 Prefix, 9=Router Key)", num)
+		}
+	}
+
+	if len(subscribedList) == 0 {
+		return nil, fmt.Errorf("Subscribe list cannot be empty")
+	}
+
+	return subscribedList, nil
+}
+
 func main() {
-	host := flag.String("host", "127.0.0.1", "RTR 服务器主机名")
-	port := flag.String("port", "8282", "RTR 服务器端口")
-	protocol := flag.String("protocol", "plain", "连接协议 (plain/tls/ssh)")
-	statsInterval := flag.Duration("stats", 30*time.Second, "统计信息输出间隔")
+	host := flag.String("host", "127.0.0.1", "RTR server host name or IP address")
+	port := flag.String("port", "8282", "RTR server port")
+	protocol := flag.String("protocol", "plain", "connect protocol (plain/tls/ssh)")
+	statsInterval := flag.Duration("stats", 30*time.Second, "stats print interval (e.g., 30s, 1m)")
+	subscribe := flag.String("subscribe", "", "subscribe PDU type list, e.g., '4,6,9' (4=IPv4 Prefix, 6=IPv6 Prefix, 9=Router Key), if empty subscribe all types")
 	flag.Parse()
 
 	addr := fmt.Sprintf("%s:%s", *host, *port)
 
-	client := &RTRClient{
-		addr: addr,
-		vrps: make(map[string]*rtr.VRP),
-		brks: make(map[string]*rtr.BgpsecKey),
-	}
-
-	log.Printf("连接到 RTR 服务器: %s (协议: %s)\n", addr, *protocol)
-	err := client.Connect(*protocol)
+	// Parse subscribe list
+	subscribedList, err := parseSubscribeList(*subscribe)
 	if err != nil {
-		log.Fatalf("连接失败: %v", err)
+		log.Fatalf("Subscribe list error: %v", err)
 	}
 
-	// 设置信号处理
+	client := &RTRClient{
+		addr:           addr,
+		vrps:           make(map[string]*rtr.VRP),
+		brks:           make(map[string]*rtr.BgpsecKey),
+		subscribedList: subscribedList,
+	}
+
+	log.Printf("Connect to RTR server: %s (protocol: %s)\n", addr, *protocol)
+	log.Printf("Subscribe PDU type: %v\n", subscribedList)
+	err = client.Connect(*protocol)
+	if err != nil {
+		log.Fatalf("Connection failed: %v", err)
+	}
+
+	// Setup signal handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// 定期打印统计信息
+	// Periodically print stats
 	ticker := time.NewTicker(*statsInterval)
 	defer ticker.Stop()
 
-	log.Println("RTR 客户端已启动，按 Ctrl+C 退出")
+	log.Println("RTR client started, press Ctrl+C to exit")
 
 	for {
 		select {
 		case <-sigChan:
-			log.Println("收到退出信号，正在关闭...")
+			log.Println("Received interrupt signal, shutting down...")
 			client.session.Disconnect()
 			client.PrintStats()
 			os.Exit(0)
@@ -307,7 +360,7 @@ func main() {
 			client.PrintStats()
 			vrps := client.GetVRPs()
 			if len(vrps) > 0 && len(vrps) <= 10 {
-				log.Println("当前 VRPs:")
+				log.Println("Current VRPs:")
 				for _, vrp := range vrps {
 					log.Printf("  - %s (MaxLen: %d, ASN: %d)\n", vrp.Prefix, vrp.MaxLen, vrp.ASN)
 				}
