@@ -6,7 +6,7 @@ This project is built on the forked open-source [StayRTR project](https://github
 
 - Extending the RTR protocol: The Client can subscribe to specific types of RPKI data from the server via the Subscribe PDU. After a successful subscription, the server will only synchronize the subscribed types of RPKI data to the corresponding Client, reducing unnecessary data transmission and improving efficiency.
 
-By integrating these two extensions into the StayRTR project, the solution provides a more refined and efficient RPKI data synchronization mechanism, which is particularly valuable for scenarios where routers require only specific RPKI data types to meet their operational needs.
+By integrating these two extensions into the project, the solution provides a more refined and efficient RPKI data synchronization mechanism, which is particularly valuable for scenarios where routers require only specific RPKI data types to meet their operational needs.
 
 # Related IETF Document
 - https://datatracker.ietf.org/doc/draft-fu-sidrops-enhanced-slurm-filter/
